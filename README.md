@@ -27,4 +27,20 @@ demographics.
    
     pip install -r requirements.txt
     ```
+
+## Usage
+
+1. Set root_xml_path to the directory containing the XML files to be converted.
+2. Run the following command to convert the XML files to DICOM format:
+   ```
+   bash
+   
+    python main.py
+   
+   ```
+
+## Example results
+
+The following are examples of the ECG data converted from XML to DICOM format:
+![ecg_dicom.png](assets%2Fecg_dicom.png)
    
