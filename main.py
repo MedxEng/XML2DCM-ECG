@@ -556,7 +556,6 @@ def create_dicom_file(xml_file_path,
 
 if __name__ == "__main__":
     import os
-    import json
     from tqdm import tqdm
 
     # Example usage
