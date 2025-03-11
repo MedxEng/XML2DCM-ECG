@@ -347,6 +347,7 @@ class XMLFile:
             "PatientName": self.patient_data.name,
             "PatientID": self.patient_data.id,
             "PatientSex": self.patient_data.sex,
+            "PatientAge": self.patient_data.age,
 
             "AcquisitionDateTime": self.test_data.acquisition_date + self.test_data.acquisition_time,
             "StudyDate": self.test_data.study_date,
