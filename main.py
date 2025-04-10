@@ -347,13 +347,19 @@ class XMLFile:
             "PatientName": self.patient_data.name,
             "PatientID": self.patient_data.id,
             "PatientSex": self.patient_data.sex,
+            "PatientAge": self.patient_data.age,
+            "PatientBirthDate": self.patient_data.birth_date,
 
             "AcquisitionDateTime": self.test_data.acquisition_date + self.test_data.acquisition_time,
             "StudyDate": self.test_data.study_date,
             "StudyTime": self.test_data.study_time,
             "StudyID": generate_uid()[-16:],
+            "AccessionNumber": self.test_data.accession_number,
+
             # "ContentDate": self.test_data.content_date,
             # "ContentTime": self.test_data.content_time,
+            "ContentDate": self.test_data.study_date,
+            "ContentTime": self.test_data.study_time,
             # Dummy Value for InstanceNumber and SeriesNumber
             "InstanceNumber": f"{self.converted_cnt:04d}",
             "SeriesNumber": f"{self.converted_cnt:04d}",
@@ -438,39 +444,40 @@ def create_dicom_file(xml_file_path,
         # Concept Name Code Sequence (0040, A043)
         acq_context_seq = Sequence()
 
-        ecg_item = Dataset()
-        # # https://dicom.nema.org/dicom/2000/draft/00_06dr.pdf (page 82)
-        ecg_item.CodeValue = '5.4.5-33-1-1'
-        ecg_item.CodingSchemeDesignator = 'SCPECG'
-        ecg_item.CodingSchemeVersion = '1.3'
-        ecg_item.CodeMeaning = '12-lead Electrocardiogram'
+        # Lead System
+        lead_system_item = Dataset()
+        lead_system_item.ValueType = 'CODE'
+        concept_name_code_seq = Dataset()
+        concept_name_code_seq.CodeValue = '10:11345'
+        concept_name_code_seq.CodingSchemeDesignator = 'MDC'
+        concept_name_code_seq.CodeMeaning = 'Lead System'
+        lead_system_item.ConceptNameCodeSequence = Sequence([concept_name_code_seq])
 
-        # (0008,0104) - Code Meaning 설정 (12-lead ECG 정보 사용)
-        ecg_code = Dataset()
-        ecg_code.CodeValue = '5.4.5-33-1-1'
-        ecg_code.CodingSchemeDesignator = 'SCPECG'
-        ecg_code.CodeMeaning = '12-lead Electrocardiogram'
+        # https://dicom.nema.org/medical/dicom/current/output/html/part16.html#sect_CID_3263
+        concept_code_seq = Dataset()
+        concept_code_seq.CodeValue = '10:11265'
+        concept_code_seq.CodingSchemeDesignator = 'MDC'
+        concept_code_seq.CodeMeaning = 'Standard 12-lead positions, electrodes placed individually'
+        lead_system_item.ConceptCodeSequence = Sequence([concept_code_seq])
 
-        # (0040, A043) - (0008, 0104)
-        ecg_item.ConceptCodeSequence = Sequence([ecg_code])
-        acq_context_seq.append(ecg_item)
+        acq_context_seq.append(lead_system_item)
 
-        # 2. Resting
-        state_item = Dataset()
-        # # https://dicom.nema.org/medical/dicom/current/output/chtml/part16/sect_CID_3101.html
-        state_item.CodeValue = '128975004'
-        state_item.CodingSchemeDesignator = 'SCT'
-        state_item.CodeMeaning = 'Resting state'
+        # Patient State
+        patient_state_item = Dataset()
+        patient_state_item.ValueType = 'CODE'
+        concept_name_code_seq = Dataset()
+        concept_name_code_seq.CodeValue = '109054'
+        concept_name_code_seq.CodingSchemeDesignator = 'DCM'
+        concept_name_code_seq.CodeMeaning = 'Patient State'
+        patient_state_item.ConceptNameCodeSequence = Sequence([concept_name_code_seq])
 
-        # (0008,0104) - Code Meaning
-        state_code = Dataset()
-        state_code.CodeValue = '128975004'
-        state_code.CodingSchemeDesignator = 'SCT'
-        state_code.CodeMeaning = 'Resting state'
+        concept_code_seq = Dataset()
+        concept_code_seq.CodeValue = '128975004'
+        concept_code_seq.CodingSchemeDesignator = 'SCT'
+        concept_code_seq.CodeMeaning = 'Resting state'
+        patient_state_item.ConceptCodeSequence = Sequence([concept_code_seq])
 
-        # (0040, A043) - (0008, 0104)
-        state_item.ConceptNameCodeSequence = Sequence([state_code])
-        acq_context_seq.append(state_item)
+        acq_context_seq.append(patient_state_item)
 
         # AcquisitionContextSequence
         ds.AcquisitionContextSequence = acq_context_seq
