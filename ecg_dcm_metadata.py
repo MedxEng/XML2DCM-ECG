@@ -81,6 +81,7 @@ class PatientData:
     name: str = 'Anonymized'
     age: str = '000Y'
     sex: str = 'M'
+    birth_date: str = '00000000'
 
 @dataclass
 class TestData:
@@ -91,6 +92,10 @@ class TestData:
     study_date: str = '00000000'
     study_time: str = '000000'
     study_id: str = generate_uid()[-16:]
+
+    # Tag: 	(0008,0050)
+    accession_number: str = '0000000000000000'
+
     content_date: str = '00000000'
     content_time: str = '000000'
     # Tag: (0008, 1090)
