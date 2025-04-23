@@ -44,7 +44,9 @@ class XMLFile:
         self.patient_data = PatientData()
         self.test_data = TestData()
 
+        self.waveform_sequence_cycle = WaveformSequence()
         self.waveform_sequence = WaveformSequence()
+        self.channel_definition_sequence_cycle = ChannelDefinitionSequence()
         self.channel_definition_sequence = ChannelDefinitionSequence()
 
         self.attributes = {}
@@ -116,33 +118,87 @@ class XMLFile:
         lead_data = {}
 
         info = self.waveform_whole_info if target == 'whole' else self.waveform_cycle_info
-        lead_cnt = 0
+        num_waveform_channels = int(self.safe_find_text(info, 'NumberofLeads'))
 
+        # SamplingFrequency = SampleBase×10^(SampleExponent)
+        sample_base = int(self.safe_find_text(info, 'SampleBase'))
+        sample_exponent = int(self.safe_find_text(info, 'SampleExponent'))
+        sampling_frequency = sample_base * (10 ** sample_exponent)
+
+        lead_cnt = 0
         for lead in info:
             if lead.tag != 'LeadData':
                 continue
 
             sample_count = int(self.safe_find_text(lead, 'LeadSampleCountTotal'))
+            duration = sample_count / sampling_frequency
+            lead_sample_size = int(self.safe_find_text(lead, 'LeadSampleSize'))
+            waveform_bits_allocated = lead_sample_size * 8
+
+            high_pass_filter = str(float(self.safe_find_text(info, 'HighPassFilter')))
+            low_pass_filter = str(float(self.safe_find_text(info, 'LowPassFilter')))
 
             if lead_cnt == 0:
-                amp_units_per_bit = float(self.safe_find_text(lead, 'LeadAmplitudeUnitsPerBit'))
+                # Waveform Sequence/Channel Definition Sequence/Channel Sensitivity Correction Factor
+                sensitivity_correction_factor = float(self.safe_find_text(lead, 'LeadAmplitudeUnitsPerBit'))
+                # Waveform Sequence/Channel Definition Sequence/Channel Sensitivity Units Sequence
                 amp_units = self.safe_find_text(lead, 'LeadAmplitudeUnits')
                 if 'micro' in amp_units.lower():
-                    code_value, code_meaning = 'uV', 'microvolt'
+                    code_value, code_meaning, scheme_designator = 'uV', 'microvolt', 'UCUM'
                 elif 'milli' in amp_units.lower():
-                    code_value, code_meaning = 'mV', 'millivolt'
+                    code_value, code_meaning, scheme_designator = 'mV', 'millivolt', 'UCUM'
                 else:
                     raise ValueError(f'Invalid amplitude unit: {amp_units}')
-                # self.digital_scale_factor = amp_units_per_bit
                 self.ecg_data = replace(self.ecg_data,
-                                        amp_units_per_bit=amp_units_per_bit)
-                self.channel_definition_sequence.sensitivity_units_sequence = replace(
-                    self.channel_definition_sequence.sensitivity_units_sequence,
-                    code_value=code_value,
-                    code_meaning=code_meaning)
+                                        sampling_frequency=sampling_frequency,
+                                        sequence_length_in_seconds=duration,
+                                        # amp_units_per_bit=amp_units_per_bit,
+                                        num_waveform_channels=num_waveform_channels,
+                                        num_waveform_samples=sample_count)
+
+                multiplex_group_label = self.safe_find_text(lead, 'WaveformType')
+                channel_sample_skew = self.safe_find_text(lead, 'LeadOffsetFirstSample')
+
+                if target == 'cycle':
+                    self.channel_definition_sequence_cycle.sensitivity_units_sequence = replace(
+                        self.channel_definition_sequence_cycle.sensitivity_units_sequence,
+                        code_value=code_value,
+                        code_meaning=code_meaning,
+                        scheme_designator=scheme_designator)
+                    self.channel_definition_sequence_cycle = replace(self.channel_definition_sequence_cycle,
+                                                                     lowpass_filter=low_pass_filter,
+                                                                     highpass_filter=high_pass_filter,
+                                                                     sensitivity_correction_factor=sensitivity_correction_factor,
+                                                                     skew=channel_sample_skew)
+
+                    self.waveform_sequence_cycle = replace(self.waveform_sequence_cycle,
+                                                           originality='DERIVED',
+                                                           num_channels=num_waveform_channels,
+                                                           num_samples=sample_count,
+                                                           sampling_frequency=sampling_frequency,
+                                                           bits_allocated=waveform_bits_allocated,
+                                                           multiplex_group_label=multiplex_group_label)
+                else:
+                    self.channel_definition_sequence.sensitivity_units_sequence = replace(
+                        self.channel_definition_sequence.sensitivity_units_sequence,
+                        code_value=code_value,
+                        code_meaning=code_meaning,
+                        scheme_designator=scheme_designator)
+                    self.channel_definition_sequence = replace(self.channel_definition_sequence,
+                                                               lowpass_filter=low_pass_filter,
+                                                               highpass_filter=high_pass_filter,
+                                                               sensitivity_correction_factor=sensitivity_correction_factor,
+                                                               skew=channel_sample_skew)
+
+                    self.waveform_sequence = replace(self.waveform_sequence,
+                                                     originality='ORIGINAL',
+                                                     num_channels=num_waveform_channels,
+                                                     num_samples=sample_count,
+                                                     sampling_frequency=sampling_frequency,
+                                                     bits_allocated=waveform_bits_allocated,
+                                                     multiplex_group_label=multiplex_group_label)
 
             lead_name = self.safe_find_text(lead, 'LeadID')
-
             if lead_name in self.ecg_data.expected_leads:
                 waveform_data = base64.b64decode(self.safe_find_text(lead, 'WaveFormData'))
                 lead_waveform = np.frombuffer(waveform_data, dtype='<i2', count=sample_count)
@@ -154,10 +210,13 @@ class XMLFile:
             self.lead_data = compute_derived_leads(lead_data)
             self.lead_names = self.lead_data.keys()
             self.lead_orders = np.arange(len(self.lead_names)) + 1
-            # self.lead_data = lead_data
             self.ecg_data = replace(self.ecg_data, waveform_channel_count=len(self.lead_data.keys()))
-        else:  # target == 'cycle'
+            self.waveform_sequence = replace(self.waveform_sequence,
+                                             num_channels=len(self.lead_data.keys()))
+        else:
             self.lead_cycle_data = lead_data
+            self.waveform_sequence_cycle = replace(self.waveform_sequence_cycle,
+                                                   num_channels=len(self.lead_cycle_data.keys()))
 
     def retrieve_patient_info(self):
         """
@@ -206,15 +265,19 @@ class XMLFile:
 
             return reformat
 
+        patient_first_name = self.safe_find_text(self.patient_info, 'PatientFirstName')
+        patient_last_name = self.safe_find_text(self.patient_info, 'PatientLastName')
+        patient_first_name = patient_first_name if patient_first_name is not None else ''
+        patient_last_name = patient_last_name if patient_last_name is not None else ''
+        patient_name = patient_last_name + '^' + patient_first_name
         patient_age = format_age(self.safe_find_text(self.patient_info, 'PatientAge'))
+        patient_id = self.safe_find_text(self.patient_info, 'PatientID')
         patient_gender = format_gender(self.safe_find_text(self.patient_info, 'Gender'))
 
         if self.load_raw:
             self.patient_data = replace(self.patient_data,
-                                        name=self.safe_find_text(self.patient_info,
-                                                                 'PatientLastName') + '^' + self.safe_find_text(
-                                            self.patient_info, 'PatientFirstName'),
-                                        id=self.safe_find_text(self.patient_info, 'PatientID'),
+                                        name=patient_name,
+                                        id=patient_id,
                                         age=patient_age,
                                         sex=patient_gender)
         else:
@@ -272,6 +335,8 @@ class XMLFile:
         acquisition_time = format_time(self.safe_find_text(self.test_info, 'AcquisitionTime'))
         study_date = format_date(self.safe_find_text(self.test_info, 'EditDate'))
         study_time = format_time(self.safe_find_text(self.test_info, 'EditTime'))
+        content_date = format_date(self.safe_find_text(self.test_info, 'EditDate'))
+        content_time = format_time(self.safe_find_text(self.test_info, 'EditTime'))
 
         manufacture_model_name = self.safe_find_text(self.test_info, 'AcquisitionDevice')
         software_version = self.safe_find_text(self.test_info, 'AcquisitionSoftwareVersion')
@@ -279,11 +344,19 @@ class XMLFile:
         # station_name = self.safe_find_text(self.test_info, 'StationName')[:16]
         # current_patient_location = self.safe_find_text(self.test_info, 'CurrentPatientLocation')[:30]
 
+        # referring_physician_name not found in xml
+        # Study Instance UID (0020,000D) is generated by the function
+        # Study ID (0020,0010) is generated by the function
+        study_id = generate_uid()[-16:]
+
         self.test_data = replace(self.test_data,
                                  acquisition_date=acquisition_date,
                                  acquisition_time=acquisition_time,
                                  study_date=study_date,
                                  study_time=study_time,
+                                 content_date=content_date,
+                                 content_time=content_time,
+                                 study_id=study_id,
                                  manufacture_model_name=manufacture_model_name,
                                  software_version=software_version)
 
@@ -303,22 +376,23 @@ class XMLFile:
 
         # Check if at least one waveform segment exists
         if len(self.waveform_info) > 0:
-            self.waveform_cycle_info = self.waveform_info[0]  # First segment (cycle-level waveform)
-        else:
-            raise ValueError('No waveform data found in the XML file.')
+            for info in self.waveform_info:
+                waveform_type = self.safe_find_text(info, 'WaveformType')
+                if waveform_type == 'Median':
+                    # Cycle-level waveform
+                    self.waveform_cycle_info = info
+                else:
+                    # Whole waveform
+                    self.waveform_whole_info = info
+                    # Retrieve high-pass and low-pass filter values from waveform data
+                    high_pass_filter = str(float(self.safe_find_text(self.waveform_whole_info, 'HighPassFilter')))
+                    low_pass_filter = str(float(self.safe_find_text(self.waveform_whole_info, 'LowPassFilter')))
 
-        # Check if a second waveform segment exists
-        if len(self.waveform_info) > 1:
-            self.waveform_whole_info = self.waveform_info[1]  # Second segment (whole waveform)
+                    # Update ECG data with extracted filter values
+                    self.ecg_data = replace(self.ecg_data,
+                                            lowpass_filter=low_pass_filter,
+                                            highpass_filter=high_pass_filter)
 
-            # Retrieve high-pass and low-pass filter values from waveform data
-            high_pass_filter = str(float(self.safe_find_text(self.waveform_whole_info, 'HighPassFilter')))
-            low_pass_filter = str(float(self.safe_find_text(self.waveform_whole_info, 'LowPassFilter')))
-
-            # Update ECG data with extracted filter values
-            self.ecg_data = replace(self.ecg_data,
-                                    lowpass_filter=low_pass_filter,
-                                    highpass_filter=high_pass_filter)
         else:
             raise ValueError('No waveform data found in the XML file.')
 
@@ -353,20 +427,18 @@ class XMLFile:
             "AcquisitionDateTime": self.test_data.acquisition_date + self.test_data.acquisition_time,
             "StudyDate": self.test_data.study_date,
             "StudyTime": self.test_data.study_time,
-            "StudyID": generate_uid()[-16:],
+            "StudyID": self.test_data.study_id,
             "AccessionNumber": self.test_data.accession_number,
+            "ContentDate": self.test_data.content_date,
+            "ContentTime": self.test_data.content_time,
 
-            # "ContentDate": self.test_data.content_date,
-            # "ContentTime": self.test_data.content_time,
-            "ContentDate": self.test_data.study_date,
-            "ContentTime": self.test_data.study_time,
             # Dummy Value for InstanceNumber and SeriesNumber
             "InstanceNumber": f"{self.converted_cnt:04d}",
             "SeriesNumber": f"{self.converted_cnt:04d}",
 
             "InstitutionName": self.test_data.institution_name,
             "StationName": self.test_data.station_name,
-            "CurrentPatientLocation": self.test_data.current_patient_location,
+            # "CurrentPatientLocation": self.test_data.current_patient_location,
 
             "OperatorsName": self.test_data.operator_name,
             "NameOfPhysiciansReadingStudy": self.test_data.physician_name,
@@ -385,8 +457,78 @@ class XMLFile:
         }
 
 
+def create_waveform_sequence_item(waveform_meta, lead_data, channel_def_seq):
+    """
+        Creates a single DICOM Waveform Sequence Item from the provided waveform metadata,
+        lead data, and channel definition information.
+
+        Parameters:
+            waveform_meta: An object containing waveform metadata.
+            lead_data: A dictionary where keys are lead names (e.g., 'I', 'II', 'V1', ...) and values are
+                       lists or arrays of signal data.
+            channel_def_seq: An object containing channel definition parameters shared across all leads,
+                             such as sensitivity, filters, baseline, etc.
+
+        Returns:
+            A pydicom Dataset object representing a single item in the (5400, 0100) Waveform Sequence.
+    """
+    waveform_sequence_item = Dataset()
+    waveform_sequence_item.WaveformOriginality = waveform_meta.originality
+    waveform_sequence_item.NumberOfWaveformChannels = waveform_meta.num_channels
+    waveform_sequence_item.NumberOfWaveformSamples = waveform_meta.num_samples
+    waveform_sequence_item.SamplingFrequency = waveform_meta.sampling_frequency
+    waveform_sequence_item.WaveformBitsAllocated = waveform_meta.bits_allocated
+    waveform_sequence_item.WaveformSampleInterpretation = waveform_meta.sample_interpretation
+
+    waveform_array = np.array(list(lead_data.values()), dtype=np.int16).T
+    waveform_sequence_item.WaveformData = waveform_array.tobytes()
+
+    waveform_sequence_item.ChannelDefinitionSequence = []
+    for k, _ in lead_data.items():
+        # *(003A, 0200) Channel Definition Sequence
+        channel_def = Dataset()
+        # **(003A, 0210) Channel Sensitivity
+        channel_def.ChannelSensitivity = channel_def_seq.sensitivity
+        # **(003A, 0215) Channel Sample Skew
+        channel_def.ChannelSampleSkew = channel_def_seq.skew
+        # **(003A, 021A) Waveform Bits Stored
+        channel_def.WaveformBitsStored = channel_def_seq.bits_stored
+        # **(3A, 0212) Channel Sensitivity Correction Factor
+        channel_def.ChannelSensitivityCorrectionFactor = channel_def_seq.sensitivity_correction_factor
+        # **(003A, 0220) Filter Low Frequency
+        channel_def.FilterLowFrequency = channel_def_seq.lowpass_filter
+        # **(003A,0221) Filter High Frequency
+        channel_def.FilterHighFrequency = channel_def_seq.highpass_filter
+        # **(003A,0213) Channel Baseline
+        channel_def.ChannelBaseline = channel_def_seq.channel_baseline
+
+        # **(003A, 0208) Channel Source Sequence
+        channel_def.ChannelSourceSequence = [Dataset()]
+        source = channel_def.ChannelSourceSequence[0]
+        # ***(0008, 0100) Code Value
+        source.CodeValue = k
+        # ***(0008, 0102) Coding Scheme Designator
+        source.CodingSchemeDesignator = channel_def_seq.source_sequence.scheme_designator
+        # ***(0008, 0104) Code Meaning
+        source.CodeMeaning = ' '.join(['Lead', k])
+
+        # **(003A, 0211) Channel Sensitivity Units Sequence
+        channel_def.ChannelSensitivityUnitsSequence = [Dataset()]
+        unit = channel_def.ChannelSensitivityUnitsSequence[0]
+        # ***(0008, 0100) Code Value
+        unit.CodeValue = channel_def_seq.sensitivity_units_sequence.code_value
+        # ***(0008, 0102) Coding Scheme Designator
+        unit.CodeMeaning = channel_def_seq.sensitivity_units_sequence.code_meaning
+        # ***(0008, 0102) Coding Scheme Designator
+        unit.CodingSchemeDesignator = channel_def_seq.sensitivity_units_sequence.scheme_designator
+        waveform_sequence_item.ChannelDefinitionSequence.append(channel_def)
+
+    return waveform_sequence_item
+
+
 def create_dicom_file(xml_file_path,
                       de_identified_mrn=None,
+                      rid_index=None,
                       output_folder='ecg_dcm',
                       converted_cnt=0):
     """
@@ -410,12 +552,14 @@ def create_dicom_file(xml_file_path,
     os.makedirs(output_folder, exist_ok=True)
 
     try:
-        output_file_path = set_dcm_save_path(source_path=xml_file_path, target_path=output_folder,
-                                             de_mrn=de_identified_mrn)
+        output_file_path = set_dcm_save_path(source_path=xml_file_path,
+                                             target_path=output_folder,
+                                             de_mrn=de_identified_mrn,
+                                             rid_index=rid_index)
 
         # Skip if DICOM file already exists
         if os.path.exists(output_file_path):
-            print(f'File {output_file_path} already exists. Skipping...')
+            print(f'File {output_file_path} already exists. {xml_file_path} Skipping...')
             return
 
         xml_data = XMLFile(xml_file_path=xml_file_path,
@@ -483,68 +627,26 @@ def create_dicom_file(xml_file_path,
         ds.AcquisitionContextSequence = acq_context_seq
 
         # Create waveform sequence item for DICOM
-        # (5400, 0100) Waveform Sequence
-        waveform_sequence_item = Dataset()
-        # *(003A, 0004) Waveform Originality
-        waveform_sequence_item.WaveformOriginality = xml_data.waveform_sequence.originality
-        # *(003A, 0005) Number of Waveform Channels
-        waveform_sequence_item.NumberOfWaveformChannels = xml_data.ecg_data.waveform_channel_count
-        # *(003A, 0010) Number of Waveform Samples
-        waveform_sequence_item.NumberOfWaveformSamples = xml_data.ecg_data.waveform_length
-        # *(003A, 001A) Sampling Frequency
-        waveform_sequence_item.SamplingFrequency = xml_data.ecg_data.sampling_rate
-        # *(5400, 1004) Waveform Bits Allocated
-        waveform_sequence_item.WaveformBitsAllocated = xml_data.waveform_sequence.bits_allocated
-        # *(5400, 1006) Waveform Sample Interpretation
-        waveform_sequence_item.WaveformSampleInterpretation = xml_data.waveform_sequence.sample_interpretation
+        waveform_sequence = Sequence()
+        # Whole waveform
+        waveform_sequence.append(
+            create_waveform_sequence_item(
+                waveform_meta=xml_data.waveform_sequence,
+                lead_data=xml_data.lead_data,
+                channel_def_seq=xml_data.channel_definition_sequence
+            )
+        )
 
-        waveform_array = np.array(list(xml_data.lead_data.values()), dtype=np.int16).T
-        waveform_sequence_item.WaveformData = waveform_array.tobytes()
-
-        # Set channel definition sequence
-        waveform_sequence_item.ChannelDefinitionSequence = []
-        # for lead_set in [xml_data.ecg_data.expected_leads, xml_data.ecg_data.derived_leads]:
-        for i, (k, _) in enumerate(xml_data.lead_data.items()):
-            # *(003A, 0200) Channel Definition Sequence
-            channel_def = Dataset()
-            # **(003A, 0210) Channel Sensitivity
-            channel_def.ChannelSensitivity = xml_data.channel_definition_sequence.sensitivity
-            # **(003A, 0215) Channel Sample Skew
-            channel_def.ChannelSampleSkew = xml_data.channel_definition_sequence.skew
-            # **(003A, 021A) Waveform Bits Stored
-            channel_def.WaveformBitsStored = xml_data.channel_definition_sequence.bits_stored
-            # **(3A, 0212) Channel Sensitivity Correction Factor
-            channel_def.ChannelSensitivityCorrectionFactor = xml_data.ecg_data.amp_units_per_bit
-            # **(003A, 0220) Filter Low Frequency
-            channel_def.FilterLowFrequency = xml_data.ecg_data.lowpass_filter
-            # **(003A, 0221) Channel Sensitivity
-            channel_def.FilterHighFrequency = xml_data.ecg_data.highpass_filter
-
-            # **(003A, 0208) Channel Source Sequence
-            channel_def.ChannelSourceSequence = [Dataset()]
-            source = channel_def.ChannelSourceSequence[0]
-            # ***(0008, 0100) Code Value
-            source.CodeValue = k
-            # ***(0008, 0102) Coding Scheme Designator
-            source.CodingSchemeDesignator = xml_data.channel_definition_sequence.source_sequence.scheme_designator
-            # ***(0008, 0103) Coding Scheme Version
-            # source.CodingSchemeVersion = xml_data.channel_definition_sequence.source_sequence.scheme_version
-            # ***(0008, 0104) Code Meaning
-            source.CodeMeaning = ' '.join(['Lead', k])
-
-            # **(003A, 0211) Channel Sensitivity Units Sequence
-            channel_def.ChannelSensitivityUnitsSequence = [Dataset()]
-            unit = channel_def.ChannelSensitivityUnitsSequence[0]
-            # ***(0008, 0100) Code Value
-            unit.CodeValue = xml_data.channel_definition_sequence.sensitivity_units_sequence.code_value  # "uV"
-            # ***(0008, 0102) Coding Scheme Designator
-            unit.CodeMeaning = xml_data.channel_definition_sequence.sensitivity_units_sequence.code_meaning
-            # ***(0008, 0104) Code Meaning
-            unit.CodingSchemeDesignator = xml_data.channel_definition_sequence.sensitivity_units_sequence.scheme_designator
-
-            waveform_sequence_item.ChannelDefinitionSequence.append(channel_def)
-
-        ds.WaveformSequence = Sequence([waveform_sequence_item])
+        # Cycle waveform
+        waveform_sequence.append(
+            create_waveform_sequence_item(
+                waveform_meta=xml_data.waveform_sequence_cycle,
+                lead_data=xml_data.lead_cycle_data,
+                channel_def_seq=xml_data.channel_definition_sequence_cycle
+            )
+        )
+        ds.WaveformSequence = waveform_sequence
+        # ds.WaveformSequence = Sequence([waveform_sequence_item])
 
         # Save DICOM file
         ds.save_as(output_file_path, write_like_original=False)
@@ -577,7 +679,6 @@ if __name__ == "__main__":
 
     count = 0
     shifted_patient_dict = {}
-
     for ecg_xml in tqdm(ecg_xml_list):
         # add dict mrn as key, rid and examination date as value
         mrn = ecg_xml.split('/')[-1].split('_')[1]
@@ -590,12 +691,14 @@ if __name__ == "__main__":
             de_identified_mrn = existing_values[0][0]
             new_values = [de_identified_mrn, rid, examination_date]
             shifted_patient_dict[mrn].append([de_identified_mrn, rid, examination_date])
+            rid_index = f'{len(shifted_patient_dict[mrn]):06d}'
         else:
             de_identified_mrn = f'{count:06d}'
             new_values = [de_identified_mrn, rid, examination_date]
             shifted_patient_dict[mrn] = [new_values]
+            rid_index = f'{len(shifted_patient_dict[mrn]):06d}'
 
-        dicom_path = create_dicom_file(ecg_xml, de_identified_mrn, converted_dcm_save_path, count)
+        dicom_path = create_dicom_file(ecg_xml, de_identified_mrn, rid_index, converted_dcm_save_path, count)
 
         if dicom_path is None:
             continue
