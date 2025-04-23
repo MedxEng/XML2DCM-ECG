@@ -23,9 +23,12 @@ def get_all_files(path, ext=None, include=None, exclude=None, return_full_path=T
         return [x for x in os.listdir(path) if exclude is None or exclude not in x]
 
 
-def set_dcm_save_path(source_path, target_path, de_mrn=None, extension='dcm'):
+def set_dcm_save_path(source_path, target_path, de_mrn=None, rid_index=None, extension='dcm'):
     if de_mrn is not None:
-        output_dcm_file_name = f"{de_mrn}_{os.path.basename(source_path).split('_')[2].split('.')[0]}.{extension}"
+        if rid_index is None:
+            rid_index = 0
+
+        output_dcm_file_name = f"{de_mrn}_{os.path.basename(source_path).split('_')[2].split('.')[0]}_{rid_index}.{extension}"
     else:
         output_dcm_file_name = f"{os.path.splitext(os.path.basename(source_path))[0]}.{extension}"
 
