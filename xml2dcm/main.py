@@ -1,12 +1,14 @@
 import os
+import argparse
 import sys
 import base64
 import traceback
 from dataclasses import replace
-
+from tqdm import tqdm
 import xml.etree.ElementTree as ET
-
 import numpy as np
+from pathlib import Path
+import re
 
 from pydicom.dataset import Dataset, FileDataset
 from pydicom.sequence import Sequence
@@ -14,7 +16,7 @@ from pydicom.uid import ExplicitVRLittleEndian, PYDICOM_IMPLEMENTATION_UID
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from utils import get_all_files, set_dcm_save_path, read_dicom, save_mrn_map_table
+from utils import get_all_files, get_all_files_recursive, set_dcm_save_path, read_dicom, save_mrn_map_table
 from ecg_dcm_metadata import *
 
 
@@ -24,18 +26,25 @@ class XMLFile:
     This class extracts patient, test, and ECG waveform information from an XML file.
     """
 
-    def __init__(self, xml_file_path, new_mrn=None, converted_cnt=0):
+    def __init__(self,
+                 xml_file_path: str,
+                 converted_cnt: int=0,
+                 load_raw: bool=False,
+                 shifted_patient_dict: dict=None):
         """
         Initializes the XMLFile instance.
 
         Args:
             xml_file_path (str): Path to the XML file.
-            new_mrn (str, optional): If provided, raw data loading is disabled.
+            converted_cnt (int): Counter for the number of converted files, used for naming DICOM files.
+            load_raw (bool): If True, de-identification is disabled and raw data is loaded.
+            shifted_patient_dict (dict): A dictionary mapping old MRNs to new MRNs for de-identification.
         """
         self.xml_file_path = xml_file_path
-        self.new_mrn = new_mrn
-        self.load_raw = False if new_mrn is not None else True
+        self.load_raw = load_raw
         self.converted_cnt = converted_cnt
+        self.shifted_patient_dict = shifted_patient_dict
+        self.original_mrn = None
 
         self.uid = UID()
         self.prefix = PreFix()
@@ -43,11 +52,14 @@ class XMLFile:
         self.ecg_data = ECGData()
         self.patient_data = PatientData()
         self.test_data = TestData()
+        self.diagnosis_data = DiagnosisData()
 
         self.waveform_sequence_cycle = WaveformSequence()
         self.waveform_sequence = WaveformSequence()
         self.channel_definition_sequence_cycle = ChannelDefinitionSequence()
         self.channel_definition_sequence = ChannelDefinitionSequence()
+
+        self.waveform_sequence_annotation = []
 
         self.attributes = {}
 
@@ -57,6 +69,7 @@ class XMLFile:
         self.waveform_info = None
         self.waveform_cycle_info = None
         self.waveform_whole_info = None
+        self.waveform_annotation_info = None
 
         # warning: lead_data should be used after multiplied by digital_scale_factor
         self.lead_data = None  # whole ecg data in digitized form
@@ -91,7 +104,6 @@ class XMLFile:
             Computes derived ECG leads (III, aVR, aVL, aVF) based on standard formulas.
 
             Args:
-                lead_dict (dict): Dictionary containing raw lead waveform data.
                 lead_dict (dict): Dictionary containing raw lead waveform data.
 
             Returns:
@@ -273,18 +285,29 @@ class XMLFile:
         patient_age = format_age(self.safe_find_text(self.patient_info, 'PatientAge'))
         patient_id = self.safe_find_text(self.patient_info, 'PatientID')
         patient_gender = format_gender(self.safe_find_text(self.patient_info, 'Gender'))
+        patient_race = self.safe_find_text(self.patient_info, 'Race')
 
         if self.load_raw:
             self.patient_data = replace(self.patient_data,
                                         name=patient_name,
                                         id=patient_id,
                                         age=patient_age,
-                                        sex=patient_gender)
+                                        sex=patient_gender,
+                                        race=patient_race)
         else:
+            if patient_id in self.shifted_patient_dict:
+                deidentified_id = self.shifted_patient_dict[patient_id]
+            else:
+                deidentified_id = f'{self.converted_cnt:06d}'
+                self.shifted_patient_dict[patient_id] = deidentified_id
+
+            self.original_mrn = patient_id
             self.patient_data = replace(self.patient_data,
-                                        id=self.new_mrn,
+                                        name=ANONYMOUS,
+                                        id=deidentified_id,
                                         age=patient_age,
-                                        sex=patient_gender)
+                                        sex=patient_gender,
+                                        race=ANONYMOUS)
 
     def retrieve_test_info(self):
         """
@@ -333,32 +356,104 @@ class XMLFile:
 
         acquisition_date = format_date(self.safe_find_text(self.test_info, 'AcquisitionDate'))
         acquisition_time = format_time(self.safe_find_text(self.test_info, 'AcquisitionTime'))
-        study_date = format_date(self.safe_find_text(self.test_info, 'EditDate'))
-        study_time = format_time(self.safe_find_text(self.test_info, 'EditTime'))
+        study_date = format_date(self.safe_find_text(self.test_info, 'AcquisitionDate'))
+        study_time = format_time(self.safe_find_text(self.test_info, 'AcquisitionTime'))
         content_date = format_date(self.safe_find_text(self.test_info, 'EditDate'))
         content_time = format_time(self.safe_find_text(self.test_info, 'EditTime'))
 
         manufacture_model_name = self.safe_find_text(self.test_info, 'AcquisitionDevice')
-        software_version = self.safe_find_text(self.test_info, 'AcquisitionSoftwareVersion')
-        # institution_name = self.safe_find_text(self.test_info, 'SiteName')
-        # station_name = self.safe_find_text(self.test_info, 'StationName')[:16]
-        # current_patient_location = self.safe_find_text(self.test_info, 'CurrentPatientLocation')[:30]
+
+        acquisition_software_version = self.safe_find_text(self.test_info, 'AcquisitionSoftwareVersion')
+        analysis_software_version = self.safe_find_text(self.test_info, 'AnalysisSoftwareVersion')
+        acquisition_software_version = acquisition_software_version if acquisition_software_version is not None else ''
+        analysis_software_version = analysis_software_version if analysis_software_version is not None else ''
+        software_version = f'{acquisition_software_version} \ {analysis_software_version}'
+
+        data_type = self.safe_find_text(self.test_info, 'DataType')
+
+        site_name = self.safe_find_text(self.test_info, 'SiteName')
+        site = self.safe_find_text(self.test_info, 'Site')
+        location_name = self.safe_find_text(self.test_info, 'LocationName')
+        location = self.safe_find_text(self.test_info, 'Location')
+        room_id = self.safe_find_text(self.test_info, 'RoomID')
+
+        overreader_last_name = self.safe_find_text(self.test_info, 'OverreaderLastName')
+        overreader_first_name = self.safe_find_text(self.test_info, 'OverreaderFirstName')
+        overreader_name = f'{overreader_last_name}^{overreader_first_name}' if overreader_last_name and overreader_first_name else ''
+
+        acquisitiontech_last_name = self.safe_find_text(self.test_info, 'AcquisitionTechLastName')
+        acquisitiontech_first_name = self.safe_find_text(self.test_info, 'AcquisitionTechFirstName')
+        acquisition_tech_name = f'{acquisitiontech_last_name}^{acquisitiontech_first_name}' if acquisitiontech_last_name and acquisitiontech_first_name else ''
 
         # referring_physician_name not found in xml
         # Study Instance UID (0020,000D) is generated by the function
         # Study ID (0020,0010) is generated by the function
         study_id = generate_uid()[-16:]
 
-        self.test_data = replace(self.test_data,
-                                 acquisition_date=acquisition_date,
-                                 acquisition_time=acquisition_time,
-                                 study_date=study_date,
-                                 study_time=study_time,
-                                 content_date=content_date,
-                                 content_time=content_time,
-                                 study_id=study_id,
-                                 manufacture_model_name=manufacture_model_name,
-                                 software_version=software_version)
+        if self.load_raw:
+            self.test_data = replace(self.test_data,
+                                     datatype=data_type,
+                                     acquisition_date=acquisition_date,
+                                     acquisition_time=acquisition_time,
+                                     study_date=study_date,
+                                     study_time=study_time,
+                                     content_date=content_date,
+                                     content_time=content_time,
+                                     study_id=study_id,
+                                     manufacture_model_name=manufacture_model_name,
+                                     software_version=software_version,
+                                     referring_physician_name=overreader_name,
+                                     operator_name=acquisition_tech_name,
+                                     institution_name=site_name,
+                                     institutional_department_name=location_name,
+                                     station_name=room_id)
+        else:
+            self.test_data = replace(self.test_data,
+                                     datatype=data_type,
+                                     acquisition_date=acquisition_date,
+                                     acquisition_time=acquisition_time,
+                                     study_date=study_date,
+                                     study_time=study_time,
+                                     content_date=content_date,
+                                     content_time=content_time,
+                                     study_id=study_id,
+                                     manufacture_model_name=manufacture_model_name,
+                                     software_version=software_version,
+                                     referring_physician_name=ANONYMOUS,
+                                     operator_name=ANONYMOUS,
+                                     institution_name=ANONYMOUS,
+                                     institutional_department_name=ANONYMOUS,
+                                     station_name=ANONYMOUS)
+
+    def retrieve_diagnosis_info(self):
+        diagnosis = self.diagnosis_info.findall('DiagnosisStatement')
+        diagnosis_text = ' '.join([self.safe_find_text(d, 'StmtText').strip() for d in diagnosis])
+        max_length = 1024
+
+        if diagnosis_text:
+            self.diagnosis_data = replace(self.diagnosis_data,
+                                          diagnosis=diagnosis_text[:max_length])
+
+    def retrieve_waveform_annotation_info(self):
+        for measurement_unit in MeasurementUnit:
+            annotation_sequence = WaveformAnnotationSequence()
+            attr_name, unit_code_value, unit_code_meaning, unit_scheme_designator = measurement_unit.value
+            annotation_sequence.measurement_units_code_sequence = replace(
+                annotation_sequence.measurement_units_code_sequence,
+                code_value=unit_code_value,
+                code_meaning=unit_code_meaning,
+                scheme_designator=unit_scheme_designator
+            )
+            measurement_code_value, measurement_code_meaning, measurement_scheme_designator = Measurement[measurement_unit.name].value
+            annotation_sequence.concept_name_code_sequence = replace(
+                annotation_sequence.concept_name_code_sequence,
+                code_value=measurement_code_value,
+                code_meaning=measurement_code_meaning,
+                scheme_designator=measurement_scheme_designator
+            )
+            value = self.safe_find_text(self.waveform_annotation_info, attr_name)
+            annotation_sequence.numeric_value = value
+            self.waveform_sequence_annotation.append(annotation_sequence)
 
     def retrieve_xml_data(self) -> None:
         """
@@ -370,6 +465,14 @@ class XMLFile:
         # Extract patient-related information
         self.patient_info = root.find('.//PatientDemographics')
         self.retrieve_patient_info()
+
+        # Extract diagnosis-related information
+        # self.diagnosis_info = root.find('.//Diagnosis')
+        # self.retrieve_diagnosis_info()
+
+        # Extract measurement-related information
+        self.waveform_annotation_info = root.find('.//RestingECGMeasurements')
+        self.retrieve_waveform_annotation_info()
 
         # Extract waveform-related information
         self.waveform_info = root.findall('.//Waveform')
@@ -404,9 +507,6 @@ class XMLFile:
         self.test_info = root.find('.//TestDemographics')
         self.retrieve_test_info()
 
-        # Extract diagnosis-related information
-        self.diagnosis_info = root.find('.//Diagnosis')
-
         # Compile extracted attributes into a dictionary
         self.collate_attr_dict()
 
@@ -438,7 +538,7 @@ class XMLFile:
 
             "InstitutionName": self.test_data.institution_name,
             "StationName": self.test_data.station_name,
-            # "CurrentPatientLocation": self.test_data.current_patient_location,
+            "InstitutionalDepartmentName": self.test_data.institutional_department_name,
 
             "OperatorsName": self.test_data.operator_name,
             "NameOfPhysiciansReadingStudy": self.test_data.physician_name,
@@ -453,7 +553,10 @@ class XMLFile:
             "ManufacturerModelName": self.test_data.manufacture_model_name,
             "SoftwareVersions": self.test_data.software_version,
 
-            "StudyDescription": self.prefix.StudyDescription
+            "StudyDescription": self.prefix.StudyDescription,
+
+            # # Diagnosis
+            # "PatientComments": self.diagnosis_data.diagnosis,
         }
 
 
@@ -527,10 +630,12 @@ def create_waveform_sequence_item(waveform_meta, lead_data, channel_def_seq):
 
 
 def create_dicom_file(xml_file_path,
-                      de_identified_mrn=None,
-                      rid_index=None,
                       output_folder='ecg_dcm',
-                      converted_cnt=0):
+                      pattern=None,
+                      pattern_values=None,
+                      converted_cnt=0,
+                      shifted_patient_dict=None,
+                      save_raw_xml=False):
     """
     Converts an XML file containing ECG data into a DICOM file format. The function
     checks for the necessary XML elements, parses patient and test data, and uses this
@@ -554,8 +659,8 @@ def create_dicom_file(xml_file_path,
     try:
         output_file_path = set_dcm_save_path(source_path=xml_file_path,
                                              target_path=output_folder,
-                                             de_mrn=de_identified_mrn,
-                                             rid_index=rid_index)
+                                             pattern=pattern,
+                                             pattern_values=pattern_values)
 
         # Skip if DICOM file already exists
         if os.path.exists(output_file_path):
@@ -563,8 +668,9 @@ def create_dicom_file(xml_file_path,
             return
 
         xml_data = XMLFile(xml_file_path=xml_file_path,
-                           new_mrn=de_identified_mrn,
-                           converted_cnt=converted_cnt)
+                           converted_cnt=converted_cnt,
+                           shifted_patient_dict=shifted_patient_dict,
+                           load_raw=False)
 
         # Create Meta data for Dicom file
         file_meta = Dataset()
@@ -648,69 +754,131 @@ def create_dicom_file(xml_file_path,
         ds.WaveformSequence = waveform_sequence
         # ds.WaveformSequence = Sequence([waveform_sequence_item])
 
+        waveform_annotation_sequence = Sequence()
+        for annotation in xml_data.waveform_sequence_annotation:
+            measurement_unit_code_seq = Dataset()
+            measurement_unit_code_seq.CodeValue = annotation.measurement_units_code_sequence.code_value
+            measurement_unit_code_seq.CodingSchemeDesignator = annotation.measurement_units_code_sequence.scheme_designator
+            measurement_unit_code_seq.CodeMeaning = annotation.measurement_units_code_sequence.code_meaning
+
+            concept_name_code_seq = Dataset()
+            concept_name_code_seq.CodeValue = annotation.concept_name_code_sequence.code_value
+            concept_name_code_seq.CodingSchemeDesignator = annotation.concept_name_code_sequence.scheme_designator
+            concept_name_code_seq.CodeMeaning = annotation.concept_name_code_sequence.code_meaning
+
+            annotation_item = Dataset()
+            annotation_item.MeasurementUnitsCodeSequence = Sequence([measurement_unit_code_seq])
+            annotation_item.ConceptNameCodeSequence = Sequence([concept_name_code_seq])
+            annotation_item.NumericValue = annotation.numeric_value
+            annotation_item.ReferencedWaveformChannels = annotation.referenced_waveform_channels
+
+            waveform_annotation_sequence.append(annotation_item)
+
+        # add diagnosis information to waveform annotation sequence
+        annotation_item = Dataset()
+        annotation_item.UnformattedTextValue = xml_data.diagnosis_data.diagnosis
+        waveform_annotation_sequence.append(annotation_item)
+
+        ds.WaveformAnnotationSequence = waveform_annotation_sequence
+
         # Save DICOM file
         ds.save_as(output_file_path, write_like_original=False)
 
         # Save raw xml data
-        os.system(f'cp {xml_file_path} {output_folder}')
+        if save_raw_xml:
+            os.system(f'cp {xml_file_path} {output_folder}')
 
-        return output_file_path
+        return output_file_path, xml_data.shifted_patient_dict, xml_data.original_mrn
 
     except Exception as e:
         print(f'Error processing file {xml_file_path}: {e}')
         print(traceback.format_exc())
 
-        return None
+        return None, shifted_patient_dict, None
 
 
-if __name__ == "__main__":
-    import os
-    from tqdm import tqdm
+def main(args):
+    if isinstance(args, dict):
+        args = argparse.Namespace(**args)
 
-    # Example usage
-    debug = True
-    debug_n = 5
+    debug = args.debug
+    debug_n = args.debug_n
 
-    root_xml_path = 'path_to_ecg_xml'
-    mrn_map_table_save_path = os.getcwd()
-    converted_dcm_save_path = 'ecg_dcm'
+    project_root = Path(args.project_root)
+    data_root = Path(args.data_root)
+    root_xml_path = data_root / args.ecg_xml_dir
+    converted_dcm_save_path = project_root / args.output_dir
 
-    ecg_xml_list = get_all_files(root_xml_path, 'xml')
+    ecg_xml_list = get_all_files_recursive(root_xml_path, 'xml')
 
     count = 0
     shifted_patient_dict = {}
+    file_seq_dict = {}
+    file_metadata_dict = {}
+
     for ecg_xml in tqdm(ecg_xml_list):
-        # add dict mrn as key, rid and examination date as value
-        mrn = ecg_xml.split('/')[-1].split('_')[1]
-        rid = ecg_xml.split('/')[-1].split('_')[0]
-        examination_date = ecg_xml.split('/')[-1].split('_')[2].split('.')[0]
+        relative_path = Path(ecg_xml).relative_to(root_xml_path).parent
+        save_path = os.path.join(converted_dcm_save_path, relative_path)
 
-        # if mrn already exists, add values to existing key, else create new key
-        if mrn in shifted_patient_dict.keys():
-            existing_values = shifted_patient_dict[mrn]
-            de_identified_mrn = existing_values[0][0]
-            new_values = [de_identified_mrn, rid, examination_date]
-            shifted_patient_dict[mrn].append([de_identified_mrn, rid, examination_date])
-            rid_index = f'{len(shifted_patient_dict[mrn]):06d}'
-        else:
-            de_identified_mrn = f'{count:06d}'
-            new_values = [de_identified_mrn, rid, examination_date]
-            shifted_patient_dict[mrn] = [new_values]
-            rid_index = f'{len(shifted_patient_dict[mrn]):06d}'
+        group_dict = re.search(args.filename_pattern, ecg_xml).groupdict()
+        examination_date = group_dict['examination_date']
+        file_seq_dict[examination_date] = file_seq_dict.get(examination_date, 0) + 1
 
-        dicom_path = create_dicom_file(ecg_xml, de_identified_mrn, rid_index, converted_dcm_save_path, count)
+        pattern_values = {'examination_date': examination_date, 'seq': file_seq_dict[examination_date]}
+        dicom_path, shifted_patient_dict, original_mrn = create_dicom_file(ecg_xml,
+                                                                           output_folder=save_path,
+                                                                           converted_cnt=count,
+                                                                           pattern=args.out_filename_pattern,
+                                                                           pattern_values=pattern_values,
+                                                                           shifted_patient_dict=shifted_patient_dict)
 
         if dicom_path is None:
             continue
 
         dicom_data = read_dicom(dicom_path)
 
+        mrn = dicom_data.get('PatientID')
+        original_file_name = Path(ecg_xml).name
+        converted_file_name = Path(dicom_path).name
+
+        file_metadata_dict[original_file_name] = {
+            'mrn': mrn,
+            'original_mrn': original_mrn,
+            'ecg_dicom_file': converted_file_name,
+        }
+
         count += 1
         if debug:
             if count == debug_n:
-                print(ecg_xml)
-                save_mrn_map_table(target_dict=shifted_patient_dict)
                 break
 
-    save_mrn_map_table(target_dict=shifted_patient_dict)
-    breakpoint()
+    save_mrn_map_table(target_dict=file_metadata_dict, target_path=converted_dcm_save_path)
+
+
+if __name__ == "__main__":
+    # Example usage:
+    # python main.py --debug=True \
+    #     --project_root=/path/to/project \
+    #     --data_root=/path/to/project \
+    #     --ecg_xml_dir=data/cdm \
+    #     --filename_pattern=MUSE_(?P<examination_date>\d{8})_(?P<examination_time>\d{6})_(?P<seq>\d{5}) \
+    #     --out_filename_pattern=ECG_DICOM_{examination_date}_{seq}
+
+    parser = argparse.ArgumentParser(description="Convert ECG XML files to DICOM format")
+    parser.add_argument('--debug', type=bool, default=False,
+                        help="Enable debug mode to process limited files")
+    parser.add_argument('--debug_n', type=int, default=5,
+                        help="Number of files to process in debug mode")
+    parser.add_argument('--project_root', type=str, required=True, help="Root directory of the project")
+    parser.add_argument('--data_root', type=str, required=True, help="Root directory for data files")
+    parser.add_argument('--ecg_xml_dir', type=str, required=True, help="Directory containing XML files")
+    parser.add_argument('--output_dir', type=str, default='ecg_dcm', help="Directory to save DICOM files")
+    parser.add_argument('--filename_pattern', type=str, required=True,
+                        help="Regex pattern to extract date and sequence from XML filenames. "
+                             "ex: MUSE_(?P<examination_date>\d{8})_(?P<examination_time>\d{6})_(?P<seq>\d{5})")
+    parser.add_argument('--out_filename_pattern', type=str, required=True,
+                        help="Pattern for naming output DICOM files. ex: ECG_DICOM_{examination_date}_{seq}")
+
+    args = parser.parse_args()
+
+    main(args)

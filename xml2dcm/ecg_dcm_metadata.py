@@ -1,6 +1,10 @@
 from datetime import datetime
 from dataclasses import dataclass, field
 from pydicom.uid import generate_uid
+from enum import Enum
+
+
+ANONYMOUS = 'Anonymized'
 
 
 @dataclass
@@ -45,8 +49,8 @@ class ChannelSensitivityUnitsSequence:
 
 @dataclass
 class ChannelDefinitionSequence:
-    source_sequence: ChannelSourceSequence = ChannelSourceSequence()
-    sensitivity_units_sequence: ChannelSensitivityUnitsSequence = ChannelSensitivityUnitsSequence()
+    source_sequence: ChannelSourceSequence = field(default_factory=ChannelSourceSequence)
+    sensitivity_units_sequence: ChannelSensitivityUnitsSequence = field(default_factory=ChannelSensitivityUnitsSequence)
 
     sensitivity: int = 1
     skew: str = "0"
@@ -66,6 +70,30 @@ class WaveformSequence:
     bits_allocated: int = 16
     sample_interpretation: str = 'SS'
     multiplex_group_label: str = 'whole'
+
+
+@dataclass
+class MeasurementUnitsCodeSequence:
+    # (0040,08EA)
+    code_value: str or None = None
+    code_meaning: str or None = None
+    scheme_designator: str or None = None
+
+
+@dataclass
+class ConceptNameCodeSequence:
+    # (0040,A043)
+    code_value: str or None = None
+    code_meaning: str or None = None
+    scheme_designator: str or None = None
+
+
+@dataclass
+class WaveformAnnotationSequence:
+    measurement_units_code_sequence: MeasurementUnitsCodeSequence = field(default_factory=MeasurementUnitsCodeSequence)
+    concept_name_code_sequence: ConceptNameCodeSequence = field(default_factory=ConceptNameCodeSequence)
+    numeric_value: str = None
+    referenced_waveform_channels = [1, 0]
 
 
 @dataclass
@@ -91,6 +119,7 @@ class PatientData:
     age: str = '000Y'
     sex: str = 'M'
     birth_date: str = '' # Type 2: if not provided, empty string
+    race: str = 'Anonymized'
 
 
 @dataclass
@@ -116,8 +145,8 @@ class TestData:
     institution_name: str = 'UNKNOWN'
     # Tag: (0008, 1010)
     station_name: str = 'UNKNOWN'
-    # Tag: (0008, 0210)
-    # current_patient_location: str = 'UNKNOWN'
+    # Tag: 	(0008, 1040)
+    institutional_department_name: str = 'UNKNOWN'
 
     # Tag: (0008, 1070)
     operator_name: str = 'UNKNOWN'
@@ -129,7 +158,7 @@ class TestData:
 
 @dataclass
 class DiagnosisData:
-    modality: str = 'ECG'
+    diagnosis: str = ''
 
 
 @dataclass
@@ -138,3 +167,49 @@ class DeIdentification:
     place: str = 'Anonymized'
     date: str = '000000'
     time: str = '000000'
+
+
+class Measurement(Enum):
+    # (code value, code_meaning, scheme_designator)
+    VentricularRate = ('2:16016', 'Ventricular Heart Rate', 'MDC')
+    AtrialRate = ('2:16020', 'Atrial Heart Rate', 'MDC')
+    PRInterval = ('2:15872', 'PR interval global', 'MDC')
+    QRSDuration = ('2:16156', 'QRS duration global', 'MDC')
+    QTInterval = ('2:16160', 'QT interval global', 'MDC')
+    QTCorrected = ('2:15876', 'QTc interval global', 'MDC')
+
+    PAxis = ('8626-4', 'P wave Axis', 'LOINC')
+    RAxis = ('9997-8', 'R wave axis', 'LOINC')
+    TAxis = ('8638-9', 'T wave Axis', 'LOINC')
+
+    POnset = ('18511-6', 'P wave onset', 'LOINC')
+    POffset = ('18512-4', 'P wave offset', 'LOINC')
+    TOffset = ('18515-7', 'T wave offset', 'LOINC')
+
+    # QTcFrederica = ('QTcFrederica', 'milliseconds', 'ms', 'UCUM')
+    # QRSCount = ('QRSCount', None, None, None)
+    # QOnset = ('QOnset', None, None, None)
+    # QOffset = ('QOffset', None, None, None)
+
+
+class MeasurementUnit(Enum):
+    # (xml attribute name, code value, code_meaning, scheme_designator)
+    VentricularRate = ('VentricularRate', 'beats per minute', '/min', 'UCUM')
+    AtrialRate = ('AtrialRate', 'beats per minute', '/min', 'UCUM')
+    PRInterval = ('PRInterval', 'milliseconds', 'ms', 'UCUM')
+    QRSDuration = ('QRSDuration', 'milliseconds', 'ms', 'UCUM')
+    QTInterval = ('QTInterval', 'milliseconds', 'ms', 'UCUM')
+    QTCorrected = ('QTCorrected', 'milliseconds', 'ms', 'UCUM')
+
+    PAxis = ('PAxis', 'degrees', 'deg', 'UCUM')
+    RAxis = ('RAxis', 'degrees', 'deg', 'UCUM')
+    TAxis = ('TAxis', 'degrees', 'deg', 'UCUM')
+
+    POnset = ('POnset', 'milliseconds', 'ms', 'UCUM')
+    POffset = ('POffset', 'milliseconds', 'ms', 'UCUM')
+    TOffset = ('TOffset', 'milliseconds', 'ms', 'UCUM')
+
+    # QTcFrederica = ('QTcFrederica', 'milliseconds', 'ms', 'UCUM')
+    # QRSCount = ('QRSCount', None, None, None)
+    # QOnset = ('QOnset', None, None, None)
+    # QOffset = ('QOffset', None, None, None)
