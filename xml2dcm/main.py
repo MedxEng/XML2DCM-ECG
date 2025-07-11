@@ -9,6 +9,7 @@ import xml.etree.ElementTree as ET
 import numpy as np
 from pathlib import Path
 import re
+import string
 
 from pydicom.dataset import Dataset, FileDataset
 from pydicom.sequence import Sequence
@@ -797,7 +798,27 @@ def create_dicom_file(xml_file_path,
         return None, shifted_patient_dict, None
 
 
-def main(args):
+def main():
+    parser = argparse.ArgumentParser(description="Convert ECG XML files to DICOM format")
+    parser.add_argument('--debug', type=bool, default=False,
+                        help="Enable debug mode to process limited files")
+    parser.add_argument('--debug_n', type=int, default=5,
+                        help="Number of files to process in debug mode")
+    parser.add_argument('--project_root', type=str, required=True, help="Root directory of the project")
+    parser.add_argument('--data_root', type=str, required=True, help="Root directory for data files")
+    parser.add_argument('--ecg_xml_dir', type=str, required=True, help="Directory containing XML files")
+    parser.add_argument('--output_dir', type=str, default='ecg_dcm', help="Directory to save DICOM files")
+    parser.add_argument('--filename_pattern', type=str, required=True,
+                        help="Regex pattern to extract date and sequence from XML filenames. "
+                             "ex: MUSE_(?P<examination_date>\d{8})_(?P<examination_time>\d{6})_(?P<seq>\d{5})")
+    parser.add_argument('--out_filename_pattern', type=str, required=True,
+                        help="Pattern for naming output DICOM files. ex: ECG_DICOM_{examination_date}_{seq}")
+
+    args = parser.parse_args()
+    run_conversion(args)
+
+
+def run_conversion(args):
     if isinstance(args, dict):
         args = argparse.Namespace(**args)
 
@@ -821,10 +842,24 @@ def main(args):
         save_path = os.path.join(converted_dcm_save_path, relative_path)
 
         group_dict = re.search(args.filename_pattern, ecg_xml).groupdict()
-        examination_date = group_dict['examination_date']
-        file_seq_dict[examination_date] = file_seq_dict.get(examination_date, 0) + 1
 
-        pattern_values = {'examination_date': examination_date, 'seq': file_seq_dict[examination_date]}
+        output_filename_keys = extract_format_keys(args.out_filename_pattern)
+
+        # only one date key is expected in the output filename pattern
+        assert len([key for key in output_filename_keys if 'date' in key]) == 1, \
+            f"Expected one date key in the output filename pattern, found {len([key for key in output_filename_keys if 'date' in key])}."
+        _date_key = [key for key in output_filename_keys if 'date' in key][0]
+        _date = group_dict[_date_key]
+
+        if 'seq' not in output_filename_keys:
+            print('Warning: No sequence number in output filename pattern. Sequence numbers will not be used to differentiate files with the same date.')
+            print('Add "seq" to the output filename pattern to enable sequence differentiation.')
+            args.out_filename_pattern += '_{seq}'
+
+        # increment the sequence number for the date
+        # sequence number is used to differentiate files with the same date.
+        file_seq_dict[_date] = file_seq_dict.get(_date, 0) + 1
+        pattern_values = {_date_key: _date, 'seq': file_seq_dict[_date]}
         dicom_path, shifted_patient_dict, original_mrn = create_dicom_file(ecg_xml,
                                                                            output_folder=save_path,
                                                                            converted_cnt=count,
@@ -855,15 +890,12 @@ def main(args):
     save_mrn_map_table(target_dict=file_metadata_dict, target_path=converted_dcm_save_path)
 
 
-if __name__ == "__main__":
-    # Example usage:
-    # python main.py --debug=True \
-    #     --project_root=/path/to/project \
-    #     --data_root=/path/to/project \
-    #     --ecg_xml_dir=data/cdm \
-    #     --filename_pattern=MUSE_(?P<examination_date>\d{8})_(?P<examination_time>\d{6})_(?P<seq>\d{5}) \
-    #     --out_filename_pattern=ECG_DICOM_{examination_date}_{seq}
+def extract_format_keys(format_string):
+    formatter = string.Formatter()
+    return [field_name for _, field_name, _, _ in formatter.parse(format_string) if field_name]
 
+
+if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Convert ECG XML files to DICOM format")
     parser.add_argument('--debug', type=bool, default=False,
                         help="Enable debug mode to process limited files")
@@ -875,10 +907,9 @@ if __name__ == "__main__":
     parser.add_argument('--output_dir', type=str, default='ecg_dcm', help="Directory to save DICOM files")
     parser.add_argument('--filename_pattern', type=str, required=True,
                         help="Regex pattern to extract date and sequence from XML filenames. "
-                             "ex: MUSE_(?P<examination_date>\d{8})_(?P<examination_time>\d{6})_(?P<seq>\d{5})")
+                             "ex: MUSE_(?P<examination_date>\d{8})_(\d{6})_(\d{5})")
     parser.add_argument('--out_filename_pattern', type=str, required=True,
                         help="Pattern for naming output DICOM files. ex: ECG_DICOM_{examination_date}_{seq}")
 
     args = parser.parse_args()
-
-    main(args)
+    run_conversion(args)

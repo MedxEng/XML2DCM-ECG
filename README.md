@@ -60,17 +60,49 @@ demographics.
 | `--filename_pattern`     | `str`   | Yes      | —           | Regex pattern to extract metadata from filenames                         |
 | `--out_filename_pattern` | `str`   | Yes      | —           | Format for naming output DICOM files using named groups from the regex   |
 
----
+
+### Pattern Requirements
+
+To ensure consistent anonymization and file management, the following pattern requirements must be satisfied.
+
+1. **Filename Pattern (`--filename_pattern`)**
+   - Must include a named group that extracts a **date value** from the XML filename.  
+     Example: `(?P<examination_date>\d{8})`
+   - The ECG XML files must have filenames that contain this date value, so the pattern can correctly extract it.
+
+2. **Output Filename Pattern (`--out_filename_pattern`)**
+   - Must contain:
+     - Exactly **one date-related key** (e.g., `{examination_date}`)
+     - A **sequence number key** (e.g., `{seq}`) to differentiate multiple files with the same date
+
+This is crucial for maintaining uniqueness among converted DICOM files, especially when multiple ECGs share the same date.
+
+If `seq` is not included in the `--out_filename_pattern`, a warning will be printed and `_{seq}` will be **automatically appended** to ensure file uniqueness:
+
+```text
+Warning: No sequence number in output filename pattern. Sequence numbers will not be used to differentiate files with the same date.
+Add "seq" to the output filename pattern to enable sequence differentiation.
+```
+
+If more than one `{...date...}` key is found in the output filename pattern, the script will raise an error to enforce a single date field:
+
+```text
+AssertionError: Expected one date key in the output filename pattern, found 2.
+```
+
+Make sure that:
+- Your `--filename_pattern` includes the group(s) matching the required keys (e.g., `(?P<examination_date>...)`)
+- Your ECG XML filenames include a date string that matches this pattern
+- Your `--out_filename_pattern` uses the same group names as placeholders (e.g., `{examination_date}`, `{seq}`)
+
 
 ### Example
 
 - **Input filename**: `MUSE_20250711_153012_00001.xml`
 - **Extracted**:
   - `examination_date = 20250711`
-  - `seq = 00001`
 - **Output filename**: `ECG_DICOM_20250711_00001.dcm`
 
----
 
 ## Example results
 

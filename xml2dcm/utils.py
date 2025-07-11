@@ -2,6 +2,8 @@ import os
 import json
 
 import pydicom
+from datetime import datetime
+
 
 def get_all_files(path, ext=None, include=None, exclude=None, return_full_path=True):
     """
@@ -109,6 +111,17 @@ def save_mrn_map_table(target_dict, target_path=None) -> None:
     target_file_name = os.path.join(target_path, 'mrn_mapping_table.json')
 
     if not os.path.exists(target_file_name):
+        with open(target_file_name, 'w') as f:
+            json.dump(target_dict, f)
+            print(f'MRN mapping table saved to {target_file_name}')
+
+    else:
+        print(f'MRN mapping table already exists at {target_file_name}')
+
+        datetime_str = datetime.today().strftime('%Y%m%d')
+        new_target_name = f'mrn_mapping_table_{datetime_str}.json'
+        target_file_name = os.path.join(target_path, new_target_name)
+
         with open(target_file_name, 'w') as f:
             json.dump(target_dict, f)
             print(f'MRN mapping table saved to {target_file_name}')
