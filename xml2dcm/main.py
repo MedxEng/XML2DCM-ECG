@@ -775,9 +775,9 @@ def create_dicom_file(xml_file_path,
             waveform_annotation_sequence.append(annotation_item)
 
         # add diagnosis information to waveform annotation sequence
-        annotation_item = Dataset()
-        annotation_item.UnformattedTextValue = xml_data.diagnosis_data.diagnosis
-        waveform_annotation_sequence.append(annotation_item)
+        # annotation_item = Dataset()
+        # annotation_item.UnformattedTextValue = xml_data.diagnosis_data.diagnosis
+        # waveform_annotation_sequence.append(annotation_item)
 
         ds.WaveformAnnotationSequence = waveform_annotation_sequence
 
